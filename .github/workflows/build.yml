@@ -1,0 +1,41 @@
+name: Build CLASH-DOLL NPU-1 (Win & Mac)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build VST3
+        run: cmake --build build --config Release --target ClashDollNPU1_VST3
+      - name: Upload Windows VST3
+        uses: actions/upload-artifact@v4
+        with:
+          name: CLASH-DOLL-Windows-VST3
+          path: build/ClashDollNPU1_artefacts/Release/VST3/CLASH-DOLL NPU-1.vst3
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build VST3 and AU
+        run: cmake --build build --config Release --target ClashDollNPU1_VST3 ClashDollNPU1_AU
+      - name: Ad-Hoc Sign macOS Plugins (Bypass Gatekeeper)
+        run: |
+          codesign --force --deep -s - "build/ClashDollNPU1_artefacts/Release/VST3/CLASH-DOLL NPU-1.vst3"
+          codesign --force --deep -s - "build/ClashDollNPU1_artefacts/Release/AU/CLASH-DOLL NPU-1.component"
+      - name: Upload macOS Universal (VST3 + AU)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CLASH-DOLL-macOS-Universal-VST3-AU
+          path: |
+            build/ClashDollNPU1_artefacts/Release/VST3/CLASH-DOLL NPU-1.vst3
+            build/ClashDollNPU1_artefacts/Release/AU/CLASH-DOLL NPU-1.component
