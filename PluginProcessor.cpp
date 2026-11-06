@@ -17,9 +17,10 @@ namespace
 
     std::vector<double> designHalfPiCoefs(int count, double transition)
     {
-        double k = std::tan((1.0 - transition * 2.0) * juce::MathConstants<double>::pi / 4.0);
+        double tr = juce::jlimit(0.0002, 0.02, transition);
+        double k = std::tan((1.0 - tr * 2.0) * juce::MathConstants<double>::pi / 4.0);
         k *= k;
-        double kk = std::pow(1.0 - k * k, 0.25);
+        double kk = std::pow(std::max(1e-12, 1.0 - k * k), 0.25);
         double e = 0.5 * (1.0 - kk) / (1.0 + kk);
         double e2 = e * e, e4 = e2 * e2;
         double q = e * (1.0 + e4 * (2.0 + e4 * (15.0 + 150.0 * e4)));
@@ -27,20 +28,20 @@ namespace
         std::vector<double> out;
         for (int idx = 0; idx < count; ++idx) {
             int c = idx + 1;
-            double num = 0.0, den = 0.0, term = 0.0;
-            int i = 0, sgn = 1;
-            do {
-                term = std::pow(q, i * (i + 1)) * std::sin((i * 2 + 1) * c * juce::MathConstants<double>::pi / order) * sgn;
-                num += term; sgn = -sgn; ++i;
-            } while (std::abs(term) > 1e-100);
-            i = 1; sgn = -1;
-            do {
-                term = std::pow(q, i * i) * std::cos(i * 2 * c * juce::MathConstants<double>::pi / order) * sgn;
-                den += term; sgn = -sgn; ++i;
-            } while (std::abs(term) > 1e-100);
+            double num = 0.0, den = 0.0;
+            for (int i = 0, sgn = 1; i < 40; ++i, sgn = -sgn) {
+                double env = std::pow(q, i * (i + 1));
+                if (env < 1e-30) break;
+                num += env * std::sin((i * 2 + 1) * c * juce::MathConstants<double>::pi / order) * sgn;
+            }
+            for (int i = 1, sgn = -1; i < 40; ++i, sgn = -sgn) {
+                double env = std::pow(q, i * i);
+                if (env < 1e-30) break;
+                den += env * std::cos(i * 2 * c * juce::MathConstants<double>::pi / order) * sgn;
+            }
             double ww = (num * std::pow(q, 0.25)) / (den + 0.5);
             double w2 = ww * ww;
-            double x = std::sqrt((1.0 - w2 * k) * (1.0 - w2 / k)) / (1.0 + w2);
+            double x = std::sqrt(std::max(0.0, (1.0 - w2 * k) * (1.0 - w2 / k))) / (1.0 + w2);
             out.push_back((1.0 - x) / (1.0 + x));
         }
         return out;
@@ -85,7 +86,7 @@ void ClashDollProcessor::HilbertIQ::init(double sampleRate)
         double tq[4] = { 0.5105640214317815, 0.8950477393554356, 0.9819123562931757, 0.9981819840118007 };
         std::copy(ti, ti + 4, ci); std::copy(tq, tq + 4, cq);
     } else {
-        auto c = designHalfPiCoefs(8, 30.0 / sampleRate);
+        auto c = designHalfPiCoefs(8, 30.0 / std::max(8000.0, sampleRate));
         for (int k = 0; k < 4; ++k) { ci[k] = c[k * 2]; cq[k] = c[k * 2 + 1]; }
     }
 }
@@ -115,10 +116,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout ClashDollProcessor::createPa
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> p;
 
-    // Cubic-like skew around 0 for Hz Shift
-    juce::NormalisableRange<float> hzRange(-40.0f, 40.0f,
+    // Exact cubic curve around 0 Hz matching index.html (continuous float, zero step-snapping)
+    juce::NormalisableRange<float> hzRange(
+        -40.0f, 40.0f,
         [](float, float, float norm) {
-            float u = 2.0f * norm - 1.0f;
+            float u = 2.0f * juce::jlimit(0.0f, 1.0f, norm) - 1.0f;
             return (u >= 0.0f ? 1.0f : -1.0f) * std::pow(std::abs(u), 3.0f) * 40.0f;
         },
         [](float, float, float val) {
@@ -126,21 +128,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout ClashDollProcessor::createPa
             return ((u >= 0.0f ? 1.0f : -1.0f) * std::cbrt(std::abs(u)) + 1.0f) * 0.5f;
         });
 
-    p.push_back(std::make_unique<juce::AudioParameterFloat>("hz", "HZ SHIFT", hzRange, 3.2f));
-    p.push_back(std::make_unique<juce::AudioParameterFloat>("cents", "CENTS", juce::NormalisableRange<float>(-100.0f, 100.0f, 1.0f), 35.0f));
-    p.push_back(std::make_unique<juce::AudioParameterFloat>("grain", "GRAIN", juce::NormalisableRange<float>(6.0f, 12.0f, 0.1f), 8.0f));
-    p.push_back(std::make_unique<juce::AudioParameterFloat>("grind", "FM GRIND", juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.3f));
-    p.push_back(std::make_unique<juce::AudioParameterFloat>("dupe", "DUPE MIX", juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.8f));
-    p.push_back(std::make_unique<juce::AudioParameterFloat>("split", "STEREO SPLIT", juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.15f));
-    p.push_back(std::make_unique<juce::AudioParameterFloat>("focus", "CLASH FOCUS", juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.4f));
-    p.push_back(std::make_unique<juce::AudioParameterFloat>("drive", "DRIVE", juce::NormalisableRange<float>(0.0f, 36.0f, 0.1f), 20.0f));
-    p.push_back(std::make_unique<juce::AudioParameterFloat>("bias", "BIAS SPREAD", juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.35f));
-    p.push_back(std::make_unique<juce::AudioParameterFloat>("sub", "SUB SAFE 120", juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.6f));
-    p.push_back(std::make_unique<juce::AudioParameterFloat>("tone", "TONE TILT", juce::NormalisableRange<float>(-1.0f, 1.0f, 0.001f), 0.0f));
-    p.push_back(std::make_unique<juce::AudioParameterFloat>("mix", "DRY / WET", juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 1.0f));
-    p.push_back(std::make_unique<juce::AudioParameterFloat>("out", "OUTPUT", juce::NormalisableRange<float>(-24.0f, 12.0f, 0.1f), -6.0f));
-    p.push_back(std::make_unique<juce::AudioParameterChoice>("pitchMode", "Pitch Mode", juce::StringArray{ "HZ SHIFT", "CENTS", "FM GRIND" }, 1));
-    p.push_back(std::make_unique<juce::AudioParameterChoice>("distMode", "Dist Mode", juce::StringArray{ "BRUTAL CLIP", "PLASMA FOLD", "DIODE CRUNCH", "QUANTIZE RIPPER" }, 0));
+    // All ranges are continuous (no coarse interval step), matching "Ne Plus Ultra Drop" defaults
+    p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{"hz", 1}, "HZ SHIFT", hzRange, 0.0f));
+    p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{"cents", 1}, "CENTS", juce::NormalisableRange<float>(-100.0f, 100.0f), 46.0f));
+    p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{"grain", 1}, "GRAIN", juce::NormalisableRange<float>(6.0f, 12.0f), 8.0f));
+    p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{"grind", 1}, "FM GRIND", juce::NormalisableRange<float>(0.0f, 1.0f), 0.0f));
+    p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{"dupe", 1}, "DUPE MIX", juce::NormalisableRange<float>(0.0f, 1.0f), 0.85f));
+    p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{"split", 1}, "STEREO SPLIT", juce::NormalisableRange<float>(0.0f, 1.0f), 0.18f));
+    p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{"focus", 1}, "CLASH FOCUS", juce::NormalisableRange<float>(0.0f, 1.0f), 0.55f));
+    p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{"drive", 1}, "DRIVE", juce::NormalisableRange<float>(0.0f, 36.0f), 22.0f));
+    p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{"bias", 1}, "BIAS SPREAD", juce::NormalisableRange<float>(0.0f, 1.0f), 0.35f));
+    p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{"sub", 1}, "SUB SAFE 120", juce::NormalisableRange<float>(0.0f, 1.0f), 0.6f));
+    p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{"tone", 1}, "TONE TILT", juce::NormalisableRange<float>(-1.0f, 1.0f), 0.15f));
+    p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{"mix", 1}, "DRY / WET", juce::NormalisableRange<float>(0.0f, 1.0f), 1.0f));
+    p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{"out", 1}, "OUTPUT", juce::NormalisableRange<float>(-24.0f, 12.0f), -6.0f));
+    p.push_back(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID{"pitchMode", 1}, "Pitch Mode", juce::StringArray{ "HZ SHIFT", "CENTS", "FM GRIND" }, 1));
+    p.push_back(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID{"distMode", 1}, "Dist Mode", juce::StringArray{ "BRUTAL CLIP", "PLASMA FOLD", "DIODE CRUNCH", "QUANTIZE RIPPER" }, 0));
 
     return { p.begin(), p.end() };
 }
@@ -150,6 +153,7 @@ ClashDollProcessor::ClashDollProcessor()
                                       .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       apvts(*this, nullptr, "PARAMS", createParameterLayout())
 {
+    prepareToPlay(48000.0, 512);
 }
 
 bool ClashDollProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -160,54 +164,8 @@ bool ClashDollProcessor::isBusesLayoutSupported (const BusesLayout& layouts) con
     return layouts.getMainInputChannelSet() == out;
 }
 
-void ClashDollProcessor::prepareToPlay (double sampleRate, int)
+void ClashDollProcessor::syncParameters(bool snapImmediately)
 {
-    fs = sampleRate > 0.0 ? sampleRate : 48000.0;
-    hil[0].init(fs); hil[1].init(fs);
-    theta = 0.0;
-
-    dlSize = fs > 96000.0 ? 32768 : 16384;
-    dlMask = dlSize - 1;
-    dl[0].assign(dlSize, 0.0f);
-    dl[1].assign(dlSize, 0.0f);
-    dlW = 0; psPhase = 0.0;
-
-    for (int c = 0; c < 2; ++c) {
-        pre[c].reset(); post[c].reset();
-        up1[c].init(HALFBAND_STAGE1, 8);
-        up2[c].init(HALFBAND_STAGE2, 4);
-        dn2[c].init(HALFBAND_STAGE2, 4);
-        dn1[c].init(HALFBAND_STAGE1, 8);
-        dcX[c] = dcY[c] = 0.0;
-        for (int k = 0; k < 2; ++k) {
-            wetLp[c][k].reset(); wetLp[c][k].setLowpass(fs, 120.0, juce::MathConstants<double>::sqrt2 * 0.5);
-            wetHp[c][k].reset(); wetHp[c][k].setHighpass(fs, 120.0, juce::MathConstants<double>::sqrt2 * 0.5);
-        }
-        cleanLp[c].reset(); cleanLp[c].setLowpass(fs, 120.0, juce::MathConstants<double>::sqrt2 * 0.5);
-        tiltLp[c] = 0.0;
-    }
-    lastFocusDb = -100.0;
-    dcR4 = std::exp(-TWO_PI * 15.0 / (fs * 4.0));
-    dcR1 = std::exp(-TWO_PI * 15.0 / fs);
-    cleanDcX = cleanDcY = 0.0;
-    tiltA = 1.0 - std::exp(-TWO_PI * 650.0 / fs);
-    limEnv = 1.0;
-    limRel = 1.0 - std::exp(-1.0 / (0.06 * fs));
-
-    const double initVals[SMOOTH_COUNT] = {
-        0.0, 46.0, 8.0, 0.0, 0.85, 0.18, 0.55, std::pow(10.0, 22.0 / 20.0), 0.35,
-        0.6, 0.15, 1.0, std::pow(10.0, -6.0 / 20.0), 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0
-    };
-    for (int i = 0; i < SMOOTH_COUNT; ++i) s[i] = t[i] = initVals[i];
-}
-
-void ClashDollProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
-{
-    juce::ScopedNoDenormals noDenormals;
-    const int numCh = buffer.getNumChannels();
-    const int n = buffer.getNumSamples();
-    if (numCh == 0 || n == 0) return;
-
     t[S_HZ]    = apvts.getRawParameterValue("hz")->load();
     t[S_CENTS] = apvts.getRawParameterValue("cents")->load();
     t[S_GRAIN] = apvts.getRawParameterValue("grain")->load();
@@ -226,6 +184,68 @@ void ClashDollProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     int dm = (int)std::round(apvts.getRawParameterValue("distMode")->load());
     for (int i = 0; i < 3; ++i) t[S_PM0 + i] = (i == pm) ? 1.0 : 0.0;
     for (int i = 0; i < 4; ++i) t[S_DM0 + i] = (i == dm) ? 1.0 : 0.0;
+
+    if (snapImmediately) {
+        s = t;
+        double focusDb = s[S_FOCUS] * 18.0;
+        lastFocusDb = focusDb;
+        for (int c = 0; c < 2; ++c) {
+            pre[c].setPeak(fs, 1450.0, 1.0, focusDb);
+            post[c].setPeak(fs, 1450.0, 1.0, -focusDb);
+        }
+        double tiltDb = s[S_TONE] * 9.0;
+        tiltHigh = std::pow(10.0, tiltDb / 20.0);
+        tiltLow = 1.0 / tiltHigh;
+    }
+}
+
+void ClashDollProcessor::prepareToPlay (double sampleRate, int)
+{
+    fs = sampleRate > 8000.0 ? sampleRate : 48000.0;
+    hil[0].init(fs);
+    hil[1].init(fs);
+    theta = 0.0;
+
+    dl[0].fill(0.0f);
+    dl[1].fill(0.0f);
+    dlW = 0;
+    psPhase = 0.0;
+
+    for (int c = 0; c < 2; ++c) {
+        pre[c].reset(); post[c].reset();
+        up1[c].init(HALFBAND_STAGE1);
+        up2[c].init(HALFBAND_STAGE2);
+        dn2[c].init(HALFBAND_STAGE2);
+        dn1[c].init(HALFBAND_STAGE1);
+        dcX[c] = dcY[c] = 0.0;
+        for (int k = 0; k < 2; ++k) {
+            wetLp[c][k].reset(); wetLp[c][k].setLowpass(fs, 120.0, juce::MathConstants<double>::sqrt2 * 0.5);
+            wetHp[c][k].reset(); wetHp[c][k].setHighpass(fs, 120.0, juce::MathConstants<double>::sqrt2 * 0.5);
+        }
+        cleanLp[c].reset(); cleanLp[c].setLowpass(fs, 120.0, juce::MathConstants<double>::sqrt2 * 0.5);
+        tiltLp[c] = 0.0;
+    }
+    dcR4 = std::exp(-TWO_PI * 15.0 / (fs * 4.0));
+    dcR1 = std::exp(-TWO_PI * 15.0 / fs);
+    cleanDcX = cleanDcY = 0.0;
+    tiltA = 1.0 - std::exp(-TWO_PI * 650.0 / fs);
+    limEnv = 1.0;
+    limRel = 1.0 - std::exp(-1.0 / (0.06 * fs));
+
+    syncParameters(true);
+}
+
+void ClashDollProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    juce::ScopedNoDenormals noDenormals;
+    const int numCh = buffer.getNumChannels();
+    const int n = buffer.getNumSamples();
+    if (numCh == 0 || n == 0) return;
+
+    for (int c = 2; c < numCh; ++c)
+        buffer.clear(c, 0, n);
+
+    syncParameters(false);
 
     float* chL = buffer.getWritePointer(0);
     float* chR = numCh > 1 ? buffer.getWritePointer(1) : nullptr;
@@ -280,7 +300,7 @@ void ClashDollProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
         }
 
         {
-            double winSamples = s[S_GRAIN] * 0.001 * fs;
+            double winSamples = std::max(16.0, s[S_GRAIN] * 0.001 * fs);
             double ratio = std::pow(2.0, s[S_CENTS] / 1200.0);
             psPhase += (1.0 - ratio) / winSamples;
             psPhase -= std::floor(psPhase);
@@ -291,8 +311,8 @@ void ClashDollProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
                 double g2 = 1.0 - g1;
                 double r1 = w - (ph1 * winSamples + 2.0);
                 double r2 = w - (ph2 * winSamples + 2.0);
-                v2L += wm1 * (g1 * hermite(dl[0].data(), dlMask, r1) + g2 * hermite(dl[0].data(), dlMask, r2));
-                v2R += wm1 * (g1 * hermite(dl[1].data(), dlMask, r1) + g2 * hermite(dl[1].data(), dlMask, r2));
+                v2L += wm1 * (g1 * hermite(dl[0].data(), kDlMask, r1) + g2 * hermite(dl[0].data(), kDlMask, r2));
+                v2R += wm1 * (g1 * hermite(dl[1].data(), kDlMask, r1) + g2 * hermite(dl[1].data(), kDlMask, r2));
             }
         }
 
@@ -304,7 +324,7 @@ void ClashDollProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
             v2R += wm2 * (iR * std::cos(phR) - qR * std::sin(phR));
         }
 
-        dlW = (w + 1) & dlMask;
+        dlW = (w + 1) & kDlMask;
 
         double pan = s[S_SPLIT] * MAX_PAN;
         double ang = (pan + 1.0) * 0.7853981633974483;
@@ -391,7 +411,7 @@ void ClashDollProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
 
         visL[vPos] = (float)oL;
         visR[vPos] = (float)oR;
-        vPos = (vPos + 1) & (kScopeSize - 1);
+        vPos = (vPos + 1) & kScopeMask;
     }
 
     visWritePos.store(vPos, std::memory_order_relaxed);
@@ -402,19 +422,27 @@ void ClashDollProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
 
 void ClashDollProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    if (auto xml = apvts.copyState().createXml())
+    auto state = apvts.copyState();
+    state.setProperty("activePreset", activePresetIdx.load(std::memory_order_relaxed), nullptr);
+    if (auto xml = state.createXml())
         copyXmlToBinary(*xml, destData);
 }
 
 void ClashDollProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    if (auto xml = getXmlFromBinary(data, sizeInBytes))
-        if (xml->hasTagName(apvts.state.getType()))
-            apvts.replaceState(juce::ValueTree::fromXml(*xml));
+    if (data == nullptr || sizeInBytes <= 0) return;
+    if (auto xml = getXmlFromBinary(data, sizeInBytes)) {
+        if (xml->hasTagName(apvts.state.getType())) {
+            auto vt = juce::ValueTree::fromXml(*xml);
+            activePresetIdx.store((int)vt.getProperty("activePreset", -1), std::memory_order_relaxed);
+            apvts.replaceState(vt);
+            syncParameters(true);
+        }
+    }
 }
 
 // ==============================================================================
-// MATTE BOUTIQUE PINK UI (ZERO NEON GLOW + 14% HEAVIER KNOBS)
+// MATTE BOUTIQUE PINK UI (ZERO NEON GLOW + 14% HEAVIER SMOOTH KNOBS)
 // ==============================================================================
 namespace
 {
@@ -446,12 +474,16 @@ namespace
     {
     public:
         MatteKnob(juce::AudioProcessorValueTreeState& state, const juce::String& paramID,
-                  const juce::String& labelText, bool bipolar, std::function<juce::String(float)> formatter)
-            : apvts(state), id(paramID), label(labelText), isBi(bipolar), fmt(std::move(formatter))
+                  const juce::String& labelText, bool bipolar, float defaultRealVal,
+                  std::function<juce::String(float)> formatter, std::function<void()> onEdit)
+            : apvts(state), id(paramID), label(labelText), isBi(bipolar), defReal(defaultRealVal),
+              fmt(std::move(formatter)), markEdited(std::move(onEdit))
         {
             param = apvts.getParameter(id);
-            attachment = std::make_unique<juce::ParameterAttachment>(*param, [this](float) { repaint(); }, nullptr);
-            attachment->sendInitialUpdate();
+            if (param != nullptr) {
+                attachment = std::make_unique<juce::ParameterAttachment>(*param, [this](float) { repaint(); }, nullptr);
+                attachment->sendInitialUpdate();
+            }
         }
 
         void setDimmed(bool d) { if (dimmed != d) { dimmed = d; setAlpha(dimmed ? 0.32f : 1.0f); repaint(); } }
@@ -469,7 +501,6 @@ namespace
             const float curAng   = startAng + norm * (endAng - startAng);
             const float zeroAng  = isBi ? 0.0f : startAng;
 
-            // Ticks
             for (int i = 0; i <= 10; ++i) {
                 float a = startAng + (i / 10.0f) * (endAng - startAng);
                 float r0 = 34.0f, r1 = (i % 5 == 0) ? 38.0f : 36.5f;
@@ -478,13 +509,11 @@ namespace
                            cx + r1 * std::sin(a), cy - r1 * std::cos(a), 1.4f);
             }
 
-            // Background Arc
             juce::Path bgArc;
             bgArc.addCentredArc(cx, cy, 30.0f, 30.0f, 0.0f, startAng, endAng, true);
             g.setColour(juce::Colour(0xff3a1430));
             g.strokePath(bgArc, juce::PathStrokeType(4.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
-            // Active Solid Matte Arc (No Neon Blur)
             if (std::abs(curAng - zeroAng) > 0.01f) {
                 juce::Path valArc;
                 valArc.addCentredArc(cx, cy, 30.0f, 30.0f, 0.0f, std::min(zeroAng, curAng), std::max(zeroAng, curAng), true);
@@ -492,20 +521,17 @@ namespace
                 g.strokePath(valArc, juce::PathStrokeType(4.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
             }
 
-            // Outer Skirt
             g.setColour(juce::Colour(0xff2a0c20));
             g.fillEllipse(cx - 24.0f, cy - 24.0f, 48.0f, 48.0f);
             g.setColour(colEdge);
             g.drawEllipse(cx - 24.0f, cy - 24.0f, 48.0f, 48.0f, 1.2f);
 
-            // Inner Matte Pink Cap
             juce::ColourGradient capGrad(colPastel, cx - 8.0f, cy - 10.0f, juce::Colour(0xff9e2b68), cx + 12.0f, cy + 14.0f, true);
             g.setGradientFill(capGrad);
             g.fillEllipse(cx - 18.0f, cy - 18.0f, 36.0f, 36.0f);
             g.setColour(colPastel.withAlpha(0.5f));
             g.drawEllipse(cx - 18.0f, cy - 18.0f, 36.0f, 36.0f, 1.0f);
 
-            // Pointer Line
             float px0 = cx + 4.0f * std::sin(curAng), py0 = cy - 4.0f * std::cos(curAng);
             float px1 = cx + 15.0f * std::sin(curAng), py1 = cy - 15.0f * std::cos(curAng);
             g.setColour(colObsidian);
@@ -513,70 +539,75 @@ namespace
             g.setColour(juce::Colours::white);
             g.drawLine(px0, py0, px1, py1, 1.4f);
 
-            // Label
             g.setColour(juce::Colour(0xfff3c2dc));
             g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
             g.drawText(label, 0, 74, getWidth(), 14, juce::Justification::centred);
 
-            // Value Readout Box (Flat Matte, No Text Shadow)
             juce::Rectangle<float> vb(cx - 35.0f, 90.0f, 70.0f, 18.0f);
             g.setColour(juce::Colour(0xff12050e));
             g.fillRoundedRectangle(vb, 5.0f);
             g.setColour(dragging ? colBubble : colEdge);
             g.drawRoundedRectangle(vb, 5.0f, 1.0f);
             g.setColour(colInk);
-            g.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 11.0f, juce::Font::bold));
+            g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
             g.drawText(fmt(val), vb, juce::Justification::centred);
         }
 
-        // 14% LESS SENSITIVE KNOB DRAG (0.00473 norm/px normal, 0.00103 Shift)
+        // Accumulate high-precision dragNorm so slow/Shift drags never get eaten by rounding
         void mouseDown(const juce::MouseEvent& e) override
         {
-            if (!param) return;
+            if (!param || !attachment) return;
             dragging = true;
             lastY = e.position.y;
+            dragNorm = param->getValue();
             attachment->beginGesture();
             repaint();
         }
 
         void mouseDrag(const juce::MouseEvent& e) override
         {
-            if (!dragging || !param) return;
+            if (!dragging || !param || !attachment) return;
             float dy = lastY - e.position.y;
             lastY = e.position.y;
             float sens = e.mods.isShiftDown() ? 0.00103f : 0.00473f;
-            float nextNorm = juce::jlimit(0.0f, 1.0f, param->getValue() + dy * sens);
-            attachment->setValueAsPartOfGesture( param->convertFrom0to1(nextNorm) );
+            dragNorm = juce::jlimit(0.0f, 1.0f, dragNorm + dy * sens);
+            attachment->setValueAsPartOfGesture(param->convertFrom0to1(dragNorm));
+            if (markEdited) markEdited();
         }
 
         void mouseUp(const juce::MouseEvent&) override
         {
             if (dragging) {
                 dragging = false;
-                if (param) attachment->endGesture();
+                if (param && attachment) attachment->endGesture();
                 repaint();
             }
         }
 
         void mouseDoubleClick(const juce::MouseEvent&) override
         {
-            if (param) attachment->setValueAsCompleteGesture(param->convertFrom0to1(param->getDefaultValue()));
+            if (param && attachment) {
+                attachment->setValueAsCompleteGesture(defReal);
+                if (markEdited) markEdited();
+            }
         }
 
         void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override
         {
-            if (!param || std::abs(wheel.deltaY) < 1e-5f) return;
+            if (!param || !attachment || std::abs(wheel.deltaY) < 1e-5f) return;
             float step = (wheel.deltaY > 0.0f ? 1.0f : -1.0f) * (e.mods.isShiftDown() ? 0.0034f : 0.0172f);
             float nextNorm = juce::jlimit(0.0f, 1.0f, param->getValue() + step);
             attachment->setValueAsCompleteGesture(param->convertFrom0to1(nextNorm));
+            if (markEdited) markEdited();
         }
 
     private:
         juce::AudioProcessorValueTreeState& apvts;
         juce::String id, label;
         bool isBi = false, dimmed = false, dragging = false;
-        float lastY = 0.0f;
+        float defReal = 0.0f, lastY = 0.0f, dragNorm = 0.0f;
         std::function<juce::String(float)> fmt;
+        std::function<void()> markEdited;
         juce::RangedAudioParameter* param = nullptr;
         std::unique_ptr<juce::ParameterAttachment> attachment;
     };
@@ -586,10 +617,10 @@ namespace
     public:
         ClashDollEditor(ClashDollProcessor& p) : AudioProcessorEditor(&p), proc(p)
         {
-            setSize(1120, 680);
+            auto onUserEdit = [this]() { proc.activePresetIdx.store(-1, std::memory_order_relaxed); };
 
-            auto addKnob = [this](const juce::String& id, const juce::String& lbl, bool bi, std::function<juce::String(float)> f) {
-                auto k = std::make_unique<MatteKnob>(proc.apvts, id, lbl, bi, f);
+            auto addKnob = [this, onUserEdit](const juce::String& id, const juce::String& lbl, bool bi, float defVal, std::function<juce::String(float)> f) {
+                auto k = std::make_unique<MatteKnob>(proc.apvts, id, lbl, bi, defVal, f, onUserEdit);
                 addAndMakeVisible(*k);
                 knobs[id] = std::move(k);
             };
@@ -597,46 +628,51 @@ namespace
             auto pct = [](float v) { return juce::String((int)std::round(v * 100.0f)) + "%"; };
             auto sgn = [](float v) { return v >= 0.0f ? "+" : "-"; };
 
-            addKnob("hz", "HZ SHIFT", true, [sgn](float v) {
+            // Exact defaults from PARAMS in index.html for double-click reset
+            addKnob("hz", "HZ SHIFT", true, 3.2f, [sgn](float v) {
                 return sgn(v) + juce::String(std::abs(v), std::abs(v) < 10.0f ? 2 : 1) + " Hz";
             });
-            addKnob("cents", "CENTS", true, [sgn](float v) { return sgn(v) + juce::String((int)std::abs(std::round(v))) + " ct"; });
-            addKnob("grain", "GRAIN", false, [](float v) { return juce::String(v, 1) + " ms"; });
-            addKnob("grind", "FM GRIND", false, pct);
-            addKnob("dupe", "DUPE MIX", false, pct);
-            addKnob("split", "STEREO SPLIT", false, [pct](float v) { return v < 0.005f ? juce::String("MONO") : pct(v); });
-            addKnob("focus", "CLASH FOCUS", false, [](float v) { return "+" + juce::String(v * 18.0f, 1) + " dB"; });
-            addKnob("drive", "DRIVE", false, [](float v) { return "+" + juce::String(v, 1) + " dB"; });
-            addKnob("bias", "BIAS SPREAD", false, [](float v) { return "+/-" + juce::String(v, 2); });
-            addKnob("sub", "SUB SAFE 120", false, [pct](float v) { return v < 0.005f ? juce::String("OFF") : pct(v); });
-            addKnob("tone", "TONE TILT", true, [](float v) {
+            addKnob("cents", "CENTS", true, 35.0f, [sgn](float v) { return sgn(v) + juce::String((int)std::abs(std::round(v))) + " ct"; });
+            addKnob("grain", "GRAIN", false, 8.0f, [](float v) { return juce::String(v, 1) + " ms"; });
+            addKnob("grind", "FM GRIND", false, 0.3f, pct);
+            addKnob("dupe", "DUPE MIX", false, 0.8f, pct);
+            addKnob("split", "STEREO SPLIT", false, 0.15f, [pct](float v) { return v < 0.005f ? juce::String("MONO") : pct(v); });
+            addKnob("focus", "CLASH FOCUS", false, 0.4f, [](float v) { return "+" + juce::String(v * 18.0f, 1) + " dB"; });
+            addKnob("drive", "DRIVE", false, 20.0f, [](float v) { return "+" + juce::String(v, 1) + " dB"; });
+            addKnob("bias", "BIAS SPREAD", false, 0.35f, [](float v) { return "+/-" + juce::String(v, 2); });
+            addKnob("sub", "SUB SAFE 120", false, 0.6f, [pct](float v) { return v < 0.005f ? juce::String("OFF") : pct(v); });
+            addKnob("tone", "TONE TILT", true, 0.0f, [](float v) {
                 return std::abs(v) < 0.01f ? juce::String("FLAT") : (v < 0.0f ? "DARK " : "BRIGHT ") + juce::String(std::abs(v) * 9.0f, 1);
             });
-            addKnob("mix", "DRY / WET", false, pct);
-            addKnob("out", "OUTPUT", false, [](float v) { return (v >= 0.0f ? "+" : "") + juce::String(v, 1) + " dB"; });
+            addKnob("mix", "DRY / WET", false, 1.0f, pct);
+            addKnob("out", "OUTPUT", false, -6.0f, [](float v) { return (v >= 0.0f ? "+" : "") + juce::String(v, 1) + " dB"; });
 
+            setSize(1120, 680);
             startTimerHz(60);
+        }
+
+        ~ClashDollEditor() override
+        {
+            stopTimer();
         }
 
         void resized() override
         {
-            // Module 01: Dissonance Engine
+            if (knobs.empty()) return;
+
             knobs["hz"]->setBounds(40, 415, 86, 112);
             knobs["cents"]->setBounds(130, 415, 86, 112);
             knobs["grain"]->setBounds(220, 415, 86, 112);
             knobs["grind"]->setBounds(40, 528, 86, 112);
 
-            // Module 02: Clash Mix
             knobs["dupe"]->setBounds(348, 372, 92, 112);
             knobs["split"]->setBounds(448, 372, 92, 112);
             knobs["focus"]->setBounds(348, 495, 92, 112);
 
-            // Module 03: Spread Drive
             knobs["drive"]->setBounds(578, 462, 86, 112);
             knobs["bias"]->setBounds(668, 462, 86, 112);
             knobs["sub"]->setBounds(758, 462, 86, 112);
 
-            // Module 04: Output
             knobs["tone"]->setBounds(884, 372, 92, 112);
             knobs["mix"]->setBounds(984, 372, 92, 112);
             knobs["out"]->setBounds(884, 488, 92, 112);
@@ -660,34 +696,46 @@ namespace
 
             for (int i = 0; i < 3; ++i)
                 if (pitchModeRects[i].contains(pt)) {
-                    if (auto* p = proc.apvts.getParameter("pitchMode"))
+                    if (auto* p = proc.apvts.getParameter("pitchMode")) {
+                        p->beginChangeGesture();
                         p->setValueNotifyingHost(p->convertTo0to1((float)i));
-                    activePreset = -1;
+                        p->endChangeGesture();
+                    }
+                    proc.activePresetIdx.store(-1, std::memory_order_relaxed);
+                    repaint();
                     return;
                 }
 
             for (int i = 0; i < 4; ++i)
                 if (distModeRects[i].contains(pt)) {
-                    if (auto* p = proc.apvts.getParameter("distMode"))
+                    if (auto* p = proc.apvts.getParameter("distMode")) {
+                        p->beginChangeGesture();
                         p->setValueNotifyingHost(p->convertTo0to1((float)i));
-                    activePreset = -1;
+                        p->endChangeGesture();
+                    }
+                    proc.activePresetIdx.store(-1, std::memory_order_relaxed);
+                    repaint();
                     return;
                 }
         }
 
         void applyPreset(int idx)
         {
-            activePreset = idx;
+            proc.activePresetIdx.store(idx, std::memory_order_relaxed);
             const auto& pr = PRESETS[idx];
             auto setP = [this](const char* id, float val) {
-                if (auto* p = proc.apvts.getParameter(id))
+                if (auto* p = proc.apvts.getParameter(id)) {
+                    p->beginChangeGesture();
                     p->setValueNotifyingHost(p->convertTo0to1(val));
+                    p->endChangeGesture();
+                }
             };
             setP("pitchMode", (float)pr.pitchMode);
             setP("hz", pr.hz); setP("cents", pr.cents); setP("grain", pr.grain); setP("grind", pr.grind);
             setP("dupe", pr.dupe); setP("split", pr.split); setP("focus", pr.focus);
             setP("drive", pr.drive); setP("bias", pr.bias); setP("distMode", (float)pr.distMode);
             setP("sub", pr.sub); setP("tone", pr.tone); setP("mix", pr.mix); setP("out", pr.out);
+            repaint();
         }
 
         void drawPlate(juce::Graphics& g, juce::Rectangle<float> r, const juce::String& num, const juce::String& title)
@@ -702,7 +750,7 @@ namespace
             g.setColour(colBubble);
             g.fillRoundedRectangle(badge, 4.0f);
             g.setColour(colObsidian);
-            g.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 10.0f, juce::Font::bold));
+            g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
             g.drawText(num, badge, juce::Justification::centred);
 
             g.setColour(colBubble);
@@ -730,7 +778,6 @@ namespace
         {
             g.fillAll(colObsidian);
 
-            // Outer Hardware Chassis (Matte Satin Finish, Zero Glow)
             juce::Rectangle<float> rig(12.0f, 12.0f, getWidth() - 24.0f, getHeight() - 24.0f);
             juce::ColourGradient rigGrad(juce::Colour(0xff321329), 0, 0, juce::Colour(0xff1c0b17), 0, (float)getHeight(), false);
             g.setGradientFill(rigGrad);
@@ -738,7 +785,6 @@ namespace
             g.setColour(colBubble.withAlpha(0.45f));
             g.drawRoundedRectangle(rig, 22.0f, 2.0f);
 
-            // Corner Screws
             for (auto pt : { juce::Point<float>(26, 26), juce::Point<float>(getWidth() - 26.0f, 26),
                              juce::Point<float>(26, getHeight() - 26.0f), juce::Point<float>(getWidth() - 26.0f, getHeight() - 26.0f) }) {
                 g.setColour(colBubble);
@@ -747,7 +793,6 @@ namespace
                 g.drawLine(pt.x - 3.5f, pt.y - 2.5f, pt.x + 3.5f, pt.y + 2.5f, 1.5f);
             }
 
-            // Brand Header
             juce::Rectangle<float> logoBox(34.0f, 26.0f, 40.0f, 40.0f);
             g.setColour(colMagenta);
             g.fillRoundedRectangle(logoBox, 11.0f);
@@ -759,10 +804,10 @@ namespace
             g.setFont(juce::FontOptions(21.0f, juce::Font::bold));
             g.drawText("CLASH-DOLL NPU-1", 86, 25, 260, 24, juce::Justification::centredLeft);
             g.setColour(colMuted);
-            g.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 10.0f, juce::Font::plain));
+            g.setFont(juce::FontOptions(10.0f, juce::Font::plain));
             g.drawText("DUAL-VOICE DISSONANCE / BIAS SPREAD", 86, 48, 280, 14, juce::Justification::centredLeft);
 
-            // 5 Preset Pills
+            int activePreset = proc.activePresetIdx.load(std::memory_order_relaxed);
             int px = 385;
             for (int i = 0; i < 5; ++i) {
                 int w = (i == 0 || i == 4) ? 142 : 132;
@@ -778,7 +823,6 @@ namespace
                 px += w + 8;
             }
 
-            // Screens: Stereo Scope & Goniometer
             juce::Rectangle<float> scopeBox(28.0f, 80.0f, 756.0f, 232.0f);
             juce::Rectangle<float> vecBox(796.0f, 80.0f, 296.0f, 232.0f);
             g.setColour(juce::Colour(0xff12050e));
@@ -788,7 +832,6 @@ namespace
             g.drawRoundedRectangle(scopeBox, 14.0f, 1.2f);
             g.drawRoundedRectangle(vecBox, 14.0f, 1.2f);
 
-            // Scope Grid
             g.setColour(colBubble.withAlpha(0.08f));
             for (int x = 1; x < 12; ++x)
                 g.drawVerticalLine((int)(scopeBox.getX() + x * scopeBox.getWidth() / 12.0f), scopeBox.getY(), scopeBox.getBottom());
@@ -797,21 +840,21 @@ namespace
             g.setColour(colBubble.withAlpha(0.22f));
             g.drawHorizontalLine((int)scopeBox.getCentreY(), scopeBox.getX(), scopeBox.getRight());
 
-            // Fetch Audio Ring Buffer
+            // Fetch 2048 samples just like index.html
             int wp = proc.visWritePos.load(std::memory_order_relaxed);
-            std::array<float, 1024> bL{}, bR{};
-            for (int i = 0; i < 1024; ++i) {
-                int idx = (wp - 1024 + i + ClashDollProcessor::kScopeSize) & (ClashDollProcessor::kScopeSize - 1);
+            std::array<float, 2048> bL{}, bR{};
+            for (int i = 0; i < 2048; ++i) {
+                int idx = (wp - 2048 + i + ClashDollProcessor::kScopeSize) & ClashDollProcessor::kScopeMask;
                 bL[i] = proc.visL[idx];
                 bR[i] = proc.visR[idx];
             }
 
             int trig = 0;
-            for (int i = 1; i < 512; ++i)
+            for (int i = 1; i < 1024; ++i)
                 if (bL[i - 1] < 0.0f && bL[i] >= 0.0f) { trig = i; break; }
 
             juce::Path pathL, pathR;
-            const int drawN = 512;
+            const int drawN = 1024;
             for (int i = 0; i < drawN; ++i) {
                 float x = scopeBox.getX() + 8.0f + (i / (float)(drawN - 1)) * (scopeBox.getWidth() - 16.0f);
                 float yL = scopeBox.getCentreY() - juce::jlimit(-1.0f, 1.0f, bL[trig + i]) * (scopeBox.getHeight() * 0.42f);
@@ -824,7 +867,6 @@ namespace
             g.setColour(colMagenta);
             g.strokePath(pathL, juce::PathStrokeType(1.8f));
 
-            // Goniometer
             float vcx = vecBox.getCentreX(), vcy = vecBox.getCentreY() - 6.0f, vrad = 86.0f;
             g.setColour(colBubble.withAlpha(0.15f));
             g.drawEllipse(vcx - vrad, vcy - vrad, vrad * 2.0f, vrad * 2.0f, 1.0f);
@@ -833,7 +875,7 @@ namespace
 
             juce::Path vecPath;
             double sl = 0.0, sr = 0.0, slr = 0.0;
-            for (int i = 0; i < 1024; ++i) {
+            for (int i = 0; i < 2048; ++i) {
                 float l = bL[i], r = bR[i];
                 sl += l * l; sr += r * r; slr += l * r;
                 float vx = vcx + (r - l) * 0.7071f * vrad;
@@ -842,12 +884,11 @@ namespace
                 else        vecPath.lineTo(vx, vy);
             }
             g.setColour(colBubble.withAlpha(0.75f));
-            g.strokePath(vecPath, juce::PathStrokeType(1.2f));
+            g.strokePath(vecPath, juce::PathStrokeType(1.1f));
 
             float corr = (sl > 1e-9 && sr > 1e-9) ? (float)(slr / std::sqrt(sl * sr)) : 1.0f;
             corrSmooth += (corr - corrSmooth) * 0.15f;
 
-            // Correlation Bar
             juce::Rectangle<float> corrBar(vecBox.getX() + 14.0f, vecBox.getBottom() - 18.0f, vecBox.getWidth() - 28.0f, 7.0f);
             g.setColour(juce::Colour(0xff2a0c20));
             g.fillRoundedRectangle(corrBar, 3.5f);
@@ -857,9 +898,8 @@ namespace
             g.setColour(juce::Colours::white);
             g.fillRoundedRectangle(dotX - 2.0f, corrBar.getY() - 2.0f, 4.0f, 11.0f, 2.0f);
 
-            // Screen HUD Text
             g.setColour(colBubble);
-            g.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 10.0f, juce::Font::bold));
+            g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
             g.drawText("STEREO SCOPE  [L: MAGENTA / R: WHITE]", (int)scopeBox.getX() + 14, (int)scopeBox.getY() + 8, 280, 14, juce::Justification::centredLeft);
 
             float pkL = proc.meterPeakL.load(std::memory_order_relaxed);
@@ -870,7 +910,6 @@ namespace
             g.drawText(juce::String("CORR ") + (corrSmooth >= 0.0f ? "+" : "") + juce::String(corrSmooth, 2),
                        (int)vecBox.getRight() - 110, (int)vecBox.getY() + 8, 96, 14, juce::Justification::centredRight);
 
-            // 4 Bottom Module Plates
             drawPlate(g, { 28.0f,  324.0f, 294.0f, 304.0f }, "01", "DISSONANCE ENGINE");
             drawPlate(g, { 334.0f, 324.0f, 222.0f, 304.0f }, "02", "CLASH MIX");
             drawPlate(g, { 568.0f, 324.0f, 290.0f, 304.0f }, "03", "SPREAD DRIVE (4x OS)");
@@ -892,14 +931,13 @@ namespace
             distModeRects[3] = juce::Rectangle<int>(582, 400, 264, 30);
             drawSegButton(g, distModeRects[3], dmNames[3], dm == 3);
 
-            // Output VU Meters & Limiter LED
             bool limActive = proc.meterGr.load(std::memory_order_relaxed) < 0.97f;
             g.setColour(limActive ? colMagenta : juce::Colour(0xff4a1835));
             g.fillEllipse(1066.0f, 335.0f, 10.0f, 10.0f);
 
             auto drawVu = [&](float y, float pk, const char* lbl) {
                 g.setColour(colMuted);
-                g.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 10.0f, juce::Font::bold));
+                g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
                 g.drawText(lbl, 886, (int)y - 2, 14, 12, juce::Justification::centredLeft);
                 juce::Rectangle<float> bar(902.0f, y, 174.0f, 8.0f);
                 g.setColour(juce::Colour(0xff12050e));
@@ -915,9 +953,8 @@ namespace
             drawVu(596.0f, pkL, "L");
             drawVu(610.0f, pkR, "R");
 
-            // Bottom Signal Chain Strip
             g.setColour(colMuted);
-            g.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 10.0f, juce::Font::bold));
+            g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
             juce::String chain = "IN  >  HILBERT I/Q  >  [V2: " + juce::String(pmNames[pm]) + "]  >  SPLIT  >  FOCUS  >  DRIVE +/-BIAS  >  [4x " + juce::String(dmNames[dm]) + "]  >  DC 15Hz  >  SUB SAFE 120Hz  >  TILT  >  LIMIT -0.1dB";
             g.drawText(chain, 28, 636, getWidth() - 56, 20, juce::Justification::centred);
         }
@@ -926,7 +963,6 @@ namespace
         ClashDollProcessor& proc;
         std::map<juce::String, std::unique_ptr<MatteKnob>> knobs;
         juce::Rectangle<int> presetRects[5], pitchModeRects[3], distModeRects[4];
-        int activePreset = 0;
         float corrSmooth = 1.0f;
     };
 }
