@@ -1,9 +1,9 @@
 #pragma once
 #include <JuceHeader.h>
 #include <array>
-#include <vector>
 #include <atomic>
 #include <cmath>
+#include <vector>
 
 class ClashDollProcessor : public juce::AudioProcessor
 {
@@ -28,7 +28,7 @@ public:
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    const juce::String getProgramName (int) override { return "Default"; }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -37,15 +37,18 @@ public:
     juce::AudioProcessorValueTreeState apvts;
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
-    // Lock-free visual data for 60fps Scope & Goniometer
-    static constexpr int kScopeSize = 2048;
+    static constexpr int kScopeSize = 4096;
+    static constexpr int kScopeMask = kScopeSize - 1;
     std::array<float, kScopeSize> visL {}, visR {};
     std::atomic<int> visWritePos { 0 };
     std::atomic<float> meterPeakL { 0.0f }, meterPeakR { 0.0f }, meterGr { 1.0f };
+    std::atomic<int> activePresetIdx { 0 };
 
 private:
     static constexpr double TWO_PI = 6.28318530717958647692;
     static constexpr double ANTI_DENORMAL = 1e-20;
+
+    void syncParameters(bool snapImmediately);
 
     struct HilbertIQ {
         double ci[4]{}, cq[4]{};
@@ -56,20 +59,18 @@ private:
         void process(double x);
     };
 
+    template <int N>
     struct Upsampler2x {
-        std::vector<double> c, x, y;
-        void init(const double* coefs, int n) {
-            c.assign(coefs, coefs + n);
-            x.assign(n, 0.0);
-            y.assign(n, 0.0);
+        std::array<double, N> c{}, x{}, y{};
+        void init(const double* coefs) {
+            for (int i = 0; i < N; ++i) { c[i] = coefs[i]; x[i] = 0.0; y[i] = 0.0; }
         }
         void process(double input, double* out, int offset) {
-            int n = (int)c.size();
             double e = input, o = input;
-            for (int i = 0; i < n; i += 2) {
+            for (int i = 0; i < N; i += 2) {
                 double ye = c[i] * (e - y[i]) + x[i];
                 x[i] = e; y[i] = ye; e = ye;
-                if (i + 1 < n) {
+                if (i + 1 < N) {
                     double yo = c[i + 1] * (o - y[i + 1]) + x[i + 1];
                     x[i + 1] = o; y[i + 1] = yo; o = yo;
                 }
@@ -79,20 +80,18 @@ private:
         }
     };
 
+    template <int N>
     struct Downsampler2x {
-        std::vector<double> c, x, y;
-        void init(const double* coefs, int n) {
-            c.assign(coefs, coefs + n);
-            x.assign(n, 0.0);
-            y.assign(n, 0.0);
+        std::array<double, N> c{}, x{}, y{};
+        void init(const double* coefs) {
+            for (int i = 0; i < N; ++i) { c[i] = coefs[i]; x[i] = 0.0; y[i] = 0.0; }
         }
         double process(double first, double second) {
-            int n = (int)c.size();
             double e = second, o = first;
-            for (int i = 0; i < n; i += 2) {
+            for (int i = 0; i < N; i += 2) {
                 double ye = c[i] * (e - y[i]) + x[i];
                 x[i] = e; y[i] = ye; e = ye;
-                if (i + 1 < n) {
+                if (i + 1 < N) {
                     double yo = c[i + 1] * (o - y[i + 1]) + x[i + 1];
                     x[i + 1] = o; y[i + 1] = yo; o = yo;
                 }
@@ -146,17 +145,19 @@ private:
     HilbertIQ hil[2];
     double theta = 0.0;
 
-    int dlSize = 16384;
-    int dlMask = 16383;
-    std::vector<float> dl[2];
+    static constexpr int kMaxDlSize = 32768;
+    static constexpr int kDlMask = kMaxDlSize - 1;
+    std::array<float, kMaxDlSize> dl[2]{};
     int dlW = 0;
     double psPhase = 0.0;
 
     Biquad pre[2], post[2];
     double lastFocusDb = -100.0;
 
-    Upsampler2x up1[2], up2[2];
-    Downsampler2x dn2[2], dn1[2];
+    Upsampler2x<8> up1[2];
+    Upsampler2x<4> up2[2];
+    Downsampler2x<4> dn2[2];
+    Downsampler2x<8> dn1[2];
     double dcR4 = 0.999, dcX[2]{}, dcY[2]{};
 
     double dcR1 = 0.998, cleanDcX = 0.0, cleanDcY = 0.0;
